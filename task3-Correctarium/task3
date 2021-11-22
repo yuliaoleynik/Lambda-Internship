@@ -1,0 +1,162 @@
+from flask import Flask,  request
+from flask_restful import Api, Resource
+from datetime import datetime, timedelta, time
+from math import ceil
+
+app = Flask(__name__)
+api = Api(app)
+
+CHECK_TIME_START = time(hour=10)                   				#константы для проверки выхода за границу времени графика
+CHECK_TIME_END = time(hour=19)
+
+
+def price(language, mimetype, count):
+	'''Функция для подсчета цены'''
+
+	price = 0
+	if language == "en":
+		if count > 1000:
+			price = count * 0.12
+		else:
+			price = 120.0
+	else:
+		if count > 1000:
+			price = count * 0.05
+		else:
+			price = 50.0
+
+	if mimetype == "other":
+		price *= 1.2
+
+	return price
+
+
+def check_time(time_request):
+	'''Функция проверки не выходит ли время запроса за рамки графика работы'''
+	
+	if time_request.time() < CHECK_TIME_START:                       
+		deadline_date = time_request.replace(hour=10, minute=0,second=0, microsecond=0)
+	elif time_request.time() >= CHECK_TIME_END:
+		time_request = time_request.replace(day=int(time_request.day) + 1, hour=10, minute=0,second=0, microsecond=0)
+		deadline_date = check_weekend(time_request)
+	else:
+		deadline_date = time_request	
+
+	return deadline_date
+
+
+def check_weekend(time_request):  									
+	'''Функция проверки не выходной ли день'''
+
+	if time_request.weekday() > 4:									#если выходной день,то переход на наближайший будний
+			while time_request.weekday() > 4:
+				time_request += timedelta(days=1)
+			time_request = time_request.replace(hour=10, minute=0,second=0, microsecond=0)
+	return time_request
+
+
+def deadline_date_func(time_work, time_request):
+	'''Функция обратобки даты сдачи работы'''
+
+	#если работа на пару часов 
+	if (time_work // 9) == 0: 										
+
+		#проверки и переход на нужное время
+		time_request = check_weekend(time_request)					
+		time_request = check_time(time_request)
+
+		#если если время запроса + время работы превышает 00 часов,то оставшееся время переходит на след.день
+		if (int(time_request.hour) + time_work) > 23:
+			time_over = (int(time_request.hour) + time_work) - 19
+
+			time_request += timedelta(days=1)
+			time_request = check_weekend(time_request)
+			deadline_date = time_request.replace(hour=10 + time_over)
+			
+			return deadline_date
+			
+		deadline_date = time_request
+		deadline_date += timedelta(hours=time_work)					
+
+		#если время запроса + время работы превышает 19 часов,то оставшееся время переходит на след.день
+		if deadline_date.time() > CHECK_TIME_END:				
+			time_over = int(deadline_date.hour) - 19
+
+			deadline_date += timedelta(days=1)
+			deadline_date = check_weekend(deadline_date)
+			deadline_date = deadline_date.replace(hour=10 + time_over)
+
+		return deadline_date
+		
+	#если работа на n-ное кол-во дней
+	else:																		
+		
+		day_to_deadline = time_work // 9											
+		hours_to_deadline = int(((time_work / 9)%1) * 10)
+		deadline_date = time_request
+
+		deadline_date = deadline_date_func(hours_to_deadline, deadline_date)
+
+		#добавление дней от запроса до дэдлайна
+		while day_to_deadline > 0:
+			deadline_date += timedelta(days=1)
+			weekday = deadline_date.weekday()
+			#пропуск выходных дней
+			if weekday >= 5:
+				continue
+			day_to_deadline -= 1
+
+		if hours_to_deadline == 0 and deadline_date.time() == CHECK_TIME_START:
+			deadline_date = deadline_date.replace(hour=19)
+
+			if deadline_date.weekday() > 0:
+				deadline_date -= timedelta(days=1)
+			else:
+				deadline_date -= timedelta(days=3)
+
+		return deadline_date
+
+
+def time_(language, mimetype, count):
+	'''Функция для подсчета кол-ва часов работы'''
+	time = 0
+
+	if language == "en":
+			time = ceil((count + 166.5) / 333)    					#по задумке, какое б кол-во символов не было, ниже 1часа не будет,
+	else:										  					#при этом добавляются еще полчаса
+			time = ceil((count + 666.5) / 1333)   
+
+	if mimetype == "other":
+		time = ceil(time * 1.2) 
+
+	time_request = datetime.now()
+	deadline_date = deadline_date_func(time, time_request)
+
+	deadline = int(deadline_date.timestamp())
+	
+	return time, deadline_date, deadline
+
+
+class Cost_Deadline(Resource):
+	"""Класс для получения запроса и возврата данных"""
+
+	def post(self):
+
+		request_data = request.get_json(force=True)
+		language = request_data['language']
+		mime = request_data['mimetype']
+		count = int(request_data['count'])
+		time, deadline_date, deadline = time_(language, mime, count)
+
+
+		return {"price": price(language, mime, count),
+				"time": time,
+				"deadline": str(deadline),
+				"deadline_date": str(deadline_date)
+				}
+
+
+api.add_resource(Cost_Deadline, "/post")
+
+if __name__ == "__main__":
+	app.run(debug=True)
